@@ -1,0 +1,225 @@
+# Main Azure DevOps Pipeline
+name: $(BuildDefinitionName)_$(date:yyyyMMdd)$(rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - apps/spring-petclinic/*
+      - container/*
+      - pipelines/*
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - apps/spring-petclinic/*
+      - container/*
+
+variables:
+  - group: 'common-variables'
+  - group: 'key-vault-connections'
+
+stages:
+  # Stage 1: Build
+  - stage: Build
+    displayName: 'Build and Test'
+    jobs:
+      - job: BuildAndTest
+        displayName: 'Build and Test Application'
+        pool:
+          name: 'ado-selfhosted-linux'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: JavaToolInstaller@0
+            inputs:
+              versionSpec: '17'
+              jdkArchitectureOption: 'x64'
+              jdkSourceOption: 'PreInstalled'
+
+          - task: Maven@3
+            displayName: 'Run Unit Tests'
+            inputs:
+              mavenPomFile: 'apps/spring-petclinic/pom.xml'
+              goals: 'clean test'
+              options: '-DskipTests=false'
+              publishJUnitResults: true
+              testResultsFiles: '**/surefire-reports/TEST-*.xml'
+              testRunTitle: 'Unit Tests'
+
+          - script: |
+              echo "Building JAR artifact"
+              mvn clean package -DskipTests
+            displayName: 'Build JAR'
+            workingDirectory: '$(Build.SourcesDirectory)/apps/spring-petclinic'
+
+          - task: CopyFiles@2
+            displayName: 'Copy JAR to Staging'
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)/apps/spring-petclinic/target'
+              Contents: '*.jar'
+              TargetFolder: '$(Build.ArtifactStagingDirectory)'
+              CleanTargetFolder: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Artifact'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'drop'
+
+  # Stage 2: Container Build and Scan
+  - stage: ContainerBuild
+    displayName: 'Build and Scan Container'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: BuildPushScan
+        displayName: 'Build, Scan, and Push Image'
+        pool:
+          name: 'ado-selfhosted-linux'
+        variables:
+          - group: 'container-registry-secrets'
+        steps:
+          - task: Docker@2
+            displayName: 'Build and Push to ACR'
+            inputs:
+              containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+              repository: '$(IMAGE_REPOSITORY)'
+              command: 'buildAndPush'
+              Dockerfile: 'container/Dockerfile'
+              context: '$(Build.SourcesDirectory)'
+              tags: |
+                $(Build.BuildId)
+                $(Build.SourceVersion)
+                latest
+              addPipelineData: false
+
+          - script: |
+              # Install Trivy
+              wget https://github.com/aquasecurity/trivy/releases/download/v0.40.0/trivy_0.40.0_Linux-64bit.deb
+              sudo dpkg -i trivy_0.40.0_Linux-64bit.deb
+              
+              # Run vulnerability scan
+              trivy image --severity HIGH,CRITICAL --no-progress \
+                --format table \
+                $(ACR_LOGIN_SERVER)/$(IMAGE_REPOSITORY):$(Build.BuildId) > vulnerability-report.txt
+            displayName: 'Vulnerability Scan with Trivy'
+            continueOnError: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Scan Results'
+            inputs:
+              PathtoPublish: 'vulnerability-report.txt'
+              ArtifactName: 'security-scan'
+
+  # Stage 3: Deploy to Development
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: ContainerBuild
+    condition: succeeded()
+    jobs:
+      - deployment: DeployDevACA
+        displayName: 'Deploy to Azure Container Apps'
+        pool:
+          name: 'ado-selfhosted-linux'
+        environment: 'dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Deploy to Container Apps'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION_ID)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az containerapp update \
+                        --name $(ACA_APP_NAME) \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --image $(ACR_LOGIN_SERVER)/$(IMAGE_REPOSITORY):$(Build.BuildId) \
+                        --revision-suffix $(Build.BuildId) \
+                        --set-env-vars "SPRING_PROFILES_ACTIVE=azure" \
+                        "DATABASE_URL=$(DEV_DATABASE_URL)" \
+                        "DATABASE_USERNAME=$(DEV_DATABASE_USERNAME)" \
+                        "DATABASE_PASSWORD=$(DEV_DATABASE_PASSWORD)" \
+                        --ingress external \
+                        --target-port 8080
+
+                - task: AzureCLI@2
+                  displayName: 'Smoke Test Deployment'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION_ID)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      APP_URL=$(az containerapp show \
+                        --name $(ACA_APP_NAME) \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --query "properties.configuration.ingress.fqdn" -o tsv)
+                      curl -f https://$APP_URL/actuator/health
+
+  # Stage 4: Deploy to Production (with Approval)
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    dependsOn: DeployDev
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProdACA
+        displayName: 'Deploy to Production'
+        pool:
+          name: 'ado-selfhosted-linux'
+        environment: 'prod'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Deploy to Production'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION_ID)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az containerapp update \
+                        --name $(ACA_PROD_APP_NAME) \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --image $(ACR_LOGIN_SERVER)/$(IMAGE_REPOSITORY):$(Build.BuildId) \
+                        --revision-suffix $(Build.BuildId) \
+                        --set-env-vars "SPRING_PROFILES_ACTIVE=azure-prod" \
+                        "DATABASE_URL=$(PROD_DATABASE_URL)" \
+                        "DATABASE_USERNAME=$(PROD_DATABASE_USERNAME)" \
+                        "DATABASE_PASSWORD=$(PROD_DATABASE_PASSWORD)" \
+                        --ingress external \
+                        --target-port 8080 \
+                        --min-replicas 2 \
+                        --max-replicas 10
+
+                - task: AzureCLI@2
+                  displayName: 'Post-Deployment Validation'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION_ID)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      APP_URL=$(az containerapp show \
+                        --name $(ACA_PROD_APP_NAME) \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --query "properties.configuration.ingress.fqdn" -o tsv)
+                      
+                      # Check health endpoint
+                      HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" https://$APP_URL/actuator/health)
+                      if [ $HEALTH_CHECK -ne 200 ]; then
+                        echo "Health check failed! HTTP Status: $HEALTH_CHECK"
+                        exit 1
+                      fi
+                      
+                      echo "Deployment successful! App is healthy."
+                      echo "Application URL: https://$APP_URL"

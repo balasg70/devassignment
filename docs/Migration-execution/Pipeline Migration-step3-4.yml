@@ -1,0 +1,7 @@
+# Update azure-pipelines.yml with specific configurations
+# Configure variable groups from Key Vault
+# Set up environment approvals
+# Test pipeline with sample build
+
+# Trigger pipeline
+az pipelines run --id <pipeline-id>

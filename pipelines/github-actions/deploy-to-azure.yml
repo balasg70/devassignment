@@ -1,0 +1,144 @@
+# GitHub Actions workflow for deployment
+name: Build and Deploy to Azure
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  IMAGE_REPOSITORY: petclinic
+  RESOURCE_GROUP: petclinic-rg
+  ACA_APP_NAME: petclinic-app
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      
+      - name: Run tests
+        run: |
+          cd apps/spring-petclinic
+          mvn clean test
+      
+      - name: Build JAR
+        run: |
+          cd apps/spring-petclinic
+          mvn clean package -DskipTests
+      
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-jar
+          path: apps/spring-petclinic/target/*.jar
+
+  build-push-scan:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Azure Login via OIDC
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+      - name: Build and Push to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      
+      - name: Build and push Docker image
+        run: |
+          docker build -f container/Dockerfile -t ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }} .
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+
+  deploy-to-dev:
+    needs: build-push-scan
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Azure Login via OIDC
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+      - name: Deploy to Container Apps (Dev)
+        run: |
+          az containerapp update \
+            --name ${{ env.ACA_APP_NAME }}-dev \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }} \
+            --revision-suffix ${{ github.sha }} \
+            --set-env-vars "SPRING_PROFILES_ACTIVE=azure" \
+            --ingress external \
+            --target-port 8080
+      
+      - name: Smoke Test
+        run: |
+          APP_URL=$(az containerapp show \
+            --name ${{ env.ACA_APP_NAME }}-dev \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          curl -f https://$APP_URL/actuator/health
+
+  deploy-to-prod:
+    needs: deploy-to-dev
+    runs-on: ubuntu-latest
+    environment: 
+      name: prod
+      url: https://${{ env.ACA_APP_NAME }}-prod.azurecontainerapps.io
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Azure Login via OIDC
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+      - name: Deploy to Container Apps (Prod)
+        run: |
+          az containerapp update \
+            --name ${{ env.ACA_APP_NAME }}-prod \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }} \
+            --revision-suffix ${{ github.sha }} \
+            --set-env-vars "SPRING_PROFILES_ACTIVE=azure-prod" \
+            "DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}" \
+            "DATABASE_USERNAME=${{ secrets.PROD_DATABASE_USERNAME }}" \
+            "DATABASE_PASSWORD=${{ secrets.PROD_DATABASE_PASSWORD }}" \
+            --ingress external \
+            --target-port 8080 \
+            --min-replicas 2 \
+            --max-replicas 10

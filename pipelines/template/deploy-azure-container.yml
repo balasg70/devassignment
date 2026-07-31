@@ -1,0 +1,58 @@
+# Reusable template for Azure Container Apps deployment
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: acrLoginServer
+    type: string
+  - name: imageRepository
+    type: string
+  - name: containerAppName
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: environmentVariables
+    type: object
+    default: {}
+  - name: minReplicas
+    type: number
+    default: 1
+  - name: maxReplicas
+    type: number
+    default: 10
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Deploy to Azure Container Apps'
+    inputs:
+      azureSubscription: '${{ parameters.azureSubscription }}'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Build environment variables string
+        ENV_VARS=""
+        ${{ each var in parameters.environmentVariables }}:
+          ENV_VARS="$ENV_VARS ${{ var.key }}=${{ var.value }}"
+        
+        # Deploy to Container Apps
+        az containerapp update \
+          --name ${{ parameters.containerAppName }} \
+          --resource-group ${{ parameters.resourceGroup }} \
+          --image ${{ parameters.acrLoginServer }}/${{ parameters.imageRepository }}:$(Build.BuildId) \
+          --revision-suffix $(Build.BuildId) \
+          --set-env-vars $ENV_VARS \
+          --ingress external \
+          --target-port 8080 \
+          --min-replicas ${{ parameters.minReplicas }} \
+          --max-replicas ${{ parameters.maxReplicas }}
+        
+        # Get and display the URL
+        APP_URL=$(az containerapp show \
+          --name ${{ parameters.containerAppName }} \
+          --resource-group ${{ parameters.resourceGroup }} \
+          --query "properties.configuration.ingress.fqdn" -o tsv)
+        
+        echo "Deployment successful!"
+        echo "Application URL: https://$APP_URL"
+        
+        # Save URL for later use
+        echo "##vso[task.setvariable variable=APP_URL]$APP_URL"

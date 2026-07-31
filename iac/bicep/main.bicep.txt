@@ -1,0 +1,215 @@
+// Azure Infrastructure as Code - Bicep Template
+// Deploys: ACR, Key Vault, Log Analytics, Application Insights, Container App
+
+@minLength(3)
+@maxLength(20)
+param environment string = 'dev'
+
+@minLength(3)
+@maxLength(20)
+param projectName string = 'petclinic'
+
+param location string = resourceGroup().location
+
+var resourceNamePrefix = '${projectName}${environment}'
+var containerAppName = '${resourceNamePrefix}-app'
+var acrName = replace('${resourceNamePrefix}acr', '-', '')
+var keyVaultName = replace('${resourceNamePrefix}kv', '-', '')
+var logAnalyticsName = '${resourceNamePrefix}-la'
+var appInsightsName = '${resourceNamePrefix}-ai'
+var containerAppEnvName = '${resourceNamePrefix}-env'
+
+// Resource Group
+resource rg 'Microsoft.Resources/resourceGroups@2022-09-01' = {
+  name: '${resourceNamePrefix}-rg'
+  location: location
+}
+
+// Container Registry
+resource acr 'Microsoft.ContainerRegistry/registries@2022-12-01' = {
+  name: acrName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    adminUserEnabled: false
+  }
+  tags: {
+    environment: environment
+    project: projectName
+  }
+}
+
+// Key Vault
+resource keyVault 'Microsoft.KeyVault/vaults@2022-07-01' = {
+  name: keyVaultName
+  location: location
+  properties: {
+    enabledForDeployment: true
+    enabledForTemplateDeployment: true
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 7
+    sku: {
+      name: 'standard'
+      family: 'A'
+    }
+    tenantId: tenant().tenantId
+    accessPolicies: [
+      {
+        tenantId: tenant().tenantId
+        objectId: 'your-object-id' // Replace with service principal object ID
+        permissions: {
+          secrets: [
+            'get'
+            'list'
+            'set'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+// Log Analytics Workspace
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
+  name: logAnalyticsName
+  location: location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+  tags: {
+    environment: environment
+    project: projectName
+  }
+}
+
+// Application Insights
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: appInsightsName
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
+    IngestionMode: 'ApplicationInsights'
+  }
+  tags: {
+    environment: environment
+    project: projectName
+  }
+}
+
+// Container Apps Environment
+resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-04-01-preview' = {
+  name: containerAppEnvName
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalytics.properties.customerId
+        sharedKey: logAnalytics.listKeys().primarySharedKey
+      }
+    }
+  }
+  tags: {
+    environment: environment
+    project: projectName
+  }
+}
+
+// Container App
+resource containerApp 'Microsoft.App/containerApps@2023-04-01-preview' = {
+  name: containerAppName
+  location: location
+  properties: {
+    managedEnvironmentId: containerAppEnv.id
+    configuration: {
+      secrets: [
+        {
+          name: 'database-password'
+          value: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/database-password/)'
+        }
+      ]
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8080
+        traffic: [
+          {
+            latestRevision: true
+            weight: 100
+          }
+        ]
+      }
+      registries: [
+        {
+          server: '${acrName}.azurecr.io'
+          username: acr.listCredentials().username
+          passwordSecretRef: 'acr-password'
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          image: '${acrName}.azurecr.io/petclinic:latest'
+          name: containerAppName
+          env: [
+            {
+              name: 'SPRING_PROFILES_ACTIVE'
+              value: 'azure'
+            }
+            {
+              name: 'DATABASE_URL'
+              value: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/database-url/)'
+            }
+            {
+              name: 'DATABASE_USERNAME'
+              value: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/database-username/)'
+            }
+            {
+              name: 'DATABASE_PASSWORD'
+              value: 'database-password'
+              secretRef: true
+            }
+          ]
+          resources: {
+            cpu: '0.25'
+            memory: '0.5Gi'
+          }
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 10
+        rules: [
+          {
+            name: 'http-rule'
+            http: {
+              metadata: {
+                concurrentRequests: '50'
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+  tags: {
+    environment: environment
+    project: projectName
+  }
+}
+
+// Outputs
+output acrLoginServer string = acr.properties.loginServer
+output acrName string = acr.name
+output keyVaultName string = keyVault.name
+output containerAppUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+output logAnalyticsWorkspaceId string = logAnalytics.id
+output appInsightsConnectionString string = appInsights.properties.ConnectionString

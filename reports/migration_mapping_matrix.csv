@@ -1,0 +1,25 @@
+Legacy Tool,Legacy Concept,Legacy Command/Config,Azure DevOps Concept,Azure DevOps Implementation,GitHub Actions Alternative,Notes/Risks
+Jenkins,Declarative Pipeline,Jenkinsfile,Azure DevOps Pipeline,azure-pipelines.yml,Workflow YAML,Map stages to ADO stages
+Jenkins,Agent,agent { label 'linux' },Agent Pool,pool: 'ado-selfhosted-linux',runs-on: self-hosted,Use self-hosted for private networks
+Jenkins,Stage,stage('Build'),Stage,stage: Build,Job,Each stage becomes a job
+Jenkins,Step,sh 'mvn clean install',Task,script: 'mvn clean install',run: 'mvn clean install',Use inline scripts or tasks
+Jenkins,Credentials,credentials('my-creds'),Key Vault,keyVault-variable-group,secrets.GITHUB_TOKEN,Store in Key Vault
+Jenkins,Artifact,stash/unstash,Artifacts,publish build artifacts,upload-artifact,Use ADO artifacts
+Jenkins,Parallel,parallel,Parallel,parallel: { job1, job2 },jobs: { job1, job2 },Supported in ADO and GitHub
+Jenkins,Post,post { always {...} },Post-deployment,post-deployment steps,workflow_dispatch,Handle in CD stage
+Jenkins,Trigger,triggers { pollSCM },Trigger,pipeline triggers,on: push,Configure in YAML
+Bamboo,Plan,bamboo.yml,Project/Repository,Azure DevOps Project,Repository,Create ADO project per plan
+Bamboo,Stage,stages:,Stage,stages:,Jobs,Map Bamboo stages to ADO stages
+Bamboo,Job,jobs:,Job,jobs:,Jobs,Each Bamboo job = ADO job
+Bamboo,Task,task: maven,Task,task: Maven@3,run: mvn,Use appropriate ADO task
+Bamboo,Artifact,artifacts,Artifacts,publish build artifacts,upload-artifact,Use ADO artifact management
+Bamboo,Variables,variables,Variables,varibles group,env:,Map to Key Vault if sensitive
+Bamboo,Agent,agent,Agent Pool,pool:,runs-on:,Self-hosted agents for legacy
+Bamboo,Deployment,deployment,Environment,environment: prod,environment: prod,Use ADO environments
+GitLab,Stage,stages:,Stage,stages:,Jobs,Map GitLab stages to ADO
+GitLab,Job,job: script,Job,job: script,run: script,Inline or task-based
+GitLab,Variables,variables,Variables,varibles group,env:,Use ADO variable groups
+GitLab,Artifacts,artifacts: paths,Artifacts,publish build artifacts,upload-artifact,Configure in ADO YAML
+GitLab,Runners,runners,Agent Pool,pool:,runs-on:,Use self-hosted for legacy
+GitLab,Environments,environment,Environment,environment:,environment:,ADO environments with approvals
+GitLab,Trigger,trigger,Trigger,pipeline triggers,on:,Set up triggers in YAML

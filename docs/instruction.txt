@@ -1,0 +1,25 @@
+Developer commits code -> GitHub
+PR triggers validation pipeline
+Branch policies enforce quality gates:
+At least 1 reviewer
+Successful build
+No direct commits to main
+CI Pipeline:
+Run unit/integration tests
+Build container image
+Run vulnerability scan (Trivy)
+Push to ACR with immutable tag
+Create deployment artifact
+Deploy to Dev (automatic):
+Update Container App revision
+Run smoke tests
+Health check validation
+Deploy to Production (manual approval):
+Request approval from designated approvers
+Deploy to prod environment
+Run post-deployment validation
+Update monitoring dashboards
+Rollback (if needed):
+Activate previous revision
+Automated verification
+Incident tracking in Jira

@@ -1,0 +1,5 @@
+# Archive/delete legacy pipeline files
+# Remove VMs/on-prem infrastructure
+# Update DNS records
+# Inform stakeholders
+# Document lessons learned

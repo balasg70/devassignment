@@ -1,0 +1,2 @@
+# Clone the Python sample
+git clone https://github.com/Azure-Samples/msdocs-python-flask-webapp-quickstart.git apps/python-flask-or-fastapi

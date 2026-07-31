@@ -1,0 +1,71 @@
+# Containerized self-hosted Azure DevOps agent
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    wget \
+    unzip \
+    software-properties-common \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    python3 \
+    python3-pip \
+    openjdk-17-jdk \
+    maven \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Azure CLI
+RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# Install Docker
+RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/
+
+# Install Helm
+RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+    && chmod 700 get_helm.sh \
+    && ./get_helm.sh
+
+# Install Trivy
+RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.40.0/trivy_0.40.0_Linux-64bit.deb \
+    && dpkg -i trivy_0.40.0_Linux-64bit.deb \
+    && rm trivy_0.40.0_Linux-64bit.deb
+
+# Install Terraform
+RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor > /usr/share/keyrings/hashicorp-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list \
+    && apt-get update && apt-get install -y terraform
+
+# Create agent user
+RUN useradd -m -u 1001 agentuser
+
+# Download and setup Azure DevOps agent
+USER agentuser
+WORKDIR /home/agentuser
+
+# Download agent - version will be set at runtime
+ENV AGENT_VERSION=3.229.1
+RUN curl -L "https://github.com/microsoft/azure-pipelines-agent/releases/download/v${AGENT_VERSION}/vsts-agent-linux-x64-${AGENT_VERSION}.tar.gz" -o agent.tar.gz \
+    && tar -xzf agent.tar.gz \
+    && rm agent.tar.gz
+
+# Environment variables for agent configuration
+ENV AZP_URL="" \
+    AZP_TOKEN="" \
+    AZP_POOL_NAME="ado-selfhosted-linux" \
+    AZP_AGENT_NAME="container-agent"
+
+# Configure and run agent
+COPY configure-agent.sh .
+RUN chmod +x configure-agent.sh
+
+CMD ["./configure-agent.sh"]

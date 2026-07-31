@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # Primary application - Spring PetClinic
+  spring-petclinic:
+    build:
+      context: ../apps/spring-petclinic
+      dockerfile: ../../container/Dockerfile
+    container_name: petclinic-app
+    environment:
+      - SPRING_PROFILES_ACTIVE=mysql
+      - DATABASE_URL=jdbc:mysql://mysql-db:3306/petclinic
+      - DATABASE_USERNAME=petclinic
+      - DATABASE_PASSWORD=petclinic
+      - JVM_OPTS=-Xmx512m -Xms256m
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Secondary workload - Python Flask
+  python-flask:
+    build:
+      context: ../apps/python-flask-or-fastapi
+      dockerfile: ../../container/Dockerfile.python
+    container_name: flask-app
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=sqlite:///app.db
+    ports:
+      - "5000:5000"
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Database - MySQL for PetClinic
+  mysql-db:
+    image: mysql:8.0
+    container_name: petclinic-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_DATABASE=petclinic
+      - MYSQL_USER=petclinic
+      - MYSQL_PASSWORD=petclinic
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  # NGINX Ingress Proxy
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: ingress-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - spring-petclinic
+      - python-flask
+    networks:
+      - app-network
+
+  # Mock external API (for egress simulation)
+  mock-external-api:
+    image: wiremock/wiremock:latest
+    container_name: mock-external
+    command: --global-response-templating
+    volumes:
+      - ./mock-external/:/home/wiremock
+    ports:
+      - "9090:8080"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mysql_data:

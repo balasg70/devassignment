@@ -1,0 +1,45 @@
+# Reusable template for container build and push
+parameters:
+  - name: dockerfilePath
+    type: string
+    default: 'container/Dockerfile'
+  - name: imageRepository
+    type: string
+  - name: acrServiceConnection
+    type: string
+  - name: acrLoginServer
+    type: string
+  - name: buildTags
+    type: object
+    default: []
+
+steps:
+  - task: Docker@2
+    displayName: 'Build and Push to ACR'
+    inputs:
+      containerRegistry: '${{ parameters.acrServiceConnection }}'
+      repository: '${{ parameters.imageRepository }}'
+      command: 'buildAndPush'
+      Dockerfile: '${{ parameters.dockerfilePath }}'
+      context: '$(Build.SourcesDirectory)'
+      tags: |
+        ${{ each tag in parameters.buildTags }}:
+          ${{ tag }}
+        $(Build.BuildId)
+        $(Build.SourceVersion)
+
+  - script: |
+      echo "Image built and pushed to: ${{ parameters.acrLoginServer }}/${{ parameters.imageRepository }}:$(Build.BuildId)"
+    displayName: 'Log Build Information'
+
+  - script: |
+      # Install Trivy for scanning
+      wget -O trivy.deb https://github.com/aquasecurity/trivy/releases/download/v0.40.0/trivy_0.40.0_Linux-64bit.deb
+      sudo dpkg -i trivy.deb
+      
+      # Run vulnerability scan
+      trivy image --severity HIGH,CRITICAL --no-progress \
+        --format table \
+        ${{ parameters.acrLoginServer }}/${{ parameters.imageRepository }}:$(Build.BuildId) || true
+    displayName: 'Vulnerability Scan'
+    continueOnError: true
